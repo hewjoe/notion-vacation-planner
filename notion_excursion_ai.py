@@ -29,17 +29,38 @@ openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 # Constants
 DATABASE_ID = os.environ.get("NOTION_DATABASE_ID")
+PEOPLE_DATABASE_ID = os.environ.get("NOTION_PEOPLE_DATABASE_ID")  # Add this to your .env file
 NAME_PROPERTY = "Name"
 DESCRIPTION_PROPERTY = "Description"
 LOCATION_PROPERTY = "Cruise Details"  # This is a relation field pointing to Cruise Schedule database
 AI_SUMMARY_PROPERTY = "MyAI Summary"
 AI_RECOMMENDATION_PROPERTY = "MyAI Recommendation"
+GUIDE_INSIGHTS_PROPERTY = "Guide Insights"  # New field for travel agent insights
 
-def get_database_pages(page_id: Optional[str] = None) -> List[Dict[str, Any]]:
+# People database properties
+PERSON_NAME_PROPERTY = "Name"
+PERSON_AGE_PROPERTY = "Age"
+PERSON_PROFILE_PROPERTY = "Profile"
+
+# Default family context in case the People database is not available
+DEFAULT_FAMILY_CONTEXT = """
+Family Composition:
+- 14-year-old girl
+- 15-year-old boy
+- 46-year-old mom
+- 46-year-old dad
+- 48-year-old uncle
+- 69-year-old grandmother
+- 70-year-old grandfather
+All family members are healthy and capable.
+"""
+
+def get_database_pages(database_id: str, page_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    Fetch pages from the Notion database.
+    Fetch pages from a Notion database.
     
     Args:
+        database_id: ID of the database to query
         page_id: Optional ID of a specific page to fetch
         
     Returns:
@@ -55,20 +76,20 @@ def get_database_pages(page_id: Optional[str] = None) -> List[Dict[str, Any]]:
     
     try:
         all_pages = []
-        query_result = notion.databases.query(database_id=DATABASE_ID)
+        query_result = notion.databases.query(database_id=database_id)
         all_pages.extend(query_result["results"])
         
         # Handle pagination if there are more results
         while query_result.get("has_more", False):
             query_result = notion.databases.query(
-                database_id=DATABASE_ID,
+                database_id=database_id,
                 start_cursor=query_result["next_cursor"]
             )
             all_pages.extend(query_result["results"])
         
         return all_pages
     except Exception as e:
-        logger.error(f"Error querying database: {e}")
+        logger.error(f"Error querying database {database_id}: {e}")
         return []
 
 def extract_text_content(rich_text_list: List[Dict[str, Any]]) -> str:
@@ -151,6 +172,88 @@ def extract_page_data(page: Dict[str, Any]) -> Dict[str, Any]:
         "description": description,
         "location": location
     }
+
+def extract_person_data(page: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract person data from a People database page.
+    
+    Args:
+        page: Notion page object from People database
+        
+    Returns:
+        Dictionary with extracted person data
+    """
+    properties = page.get("properties", {})
+    
+    name = ""
+    name_property = properties.get(PERSON_NAME_PROPERTY, {})
+    if name_property.get("type") == "title":
+        name = extract_text_content(name_property.get("title", []))
+    
+    age = None
+    age_property = properties.get(PERSON_AGE_PROPERTY, {})
+    
+    
+    if age_property.get("type") == "formula":
+        age = age_property.get("formula").get("number")
+    
+    profile = ""
+    profile_property = properties.get(PERSON_PROFILE_PROPERTY, {})
+    if profile_property.get("type") == "rich_text":
+        profile = extract_text_content(profile_property.get("rich_text", []))
+    
+    response = {
+        "name": name,
+        "age": age,
+        "profile": profile
+    }
+    logger.debug(f"Extracted person data: {response}")
+    return response 
+
+def build_family_context() -> str:
+    """
+    Build family context from the People database.
+    
+    Returns:
+        Formatted family context string
+    """
+    if not PEOPLE_DATABASE_ID:
+        logger.warning("NOTION_PEOPLE_DATABASE_ID not set in environment variables. Using default family context.")
+        return DEFAULT_FAMILY_CONTEXT
+    
+    try:
+        people_pages = get_database_pages(PEOPLE_DATABASE_ID)
+        if not people_pages:
+            logger.warning("No people found in People database. Using default family context.")
+            return DEFAULT_FAMILY_CONTEXT
+        
+        people = []
+        for page in people_pages:
+            person = extract_person_data(page)
+            if person["name"] and person["age"] is not None:
+                people.append(person)
+        
+        if not people:
+            logger.warning("No valid people data found in People database. Using default family context.")
+            return DEFAULT_FAMILY_CONTEXT
+        
+        # Sort people by age (youngest to oldest)
+        people.sort(key=lambda x: x["age"])
+        
+        # Build the context
+        context = "Family Composition:\n"
+        for person in people:
+            profile_info = f" - {person['profile']}" if person["profile"] else ""
+            context += f"- {person['name']}: {person['age']}-year-old{profile_info}\n"
+        
+        context += "\nAll family members are healthy and capable."
+        logger.info(f"Family context: {context}")
+        return context
+        
+    except Exception as e:
+        logger.error(f"Error building family context: {e}")
+        logger.warning("Using default family context due to error.")
+        return DEFAULT_FAMILY_CONTEXT
 
 def generate_ai_summary(description: str) -> str:
     """
@@ -247,7 +350,48 @@ Recommendation for "{excursion['name']}":"""
     
     return recommendations
 
-def update_notion_page(page_id: str, summary: str, recommendation: str) -> bool:
+def generate_guide_insights(description: str, location: str, family_context: str) -> str:
+    """
+    Generate travel agent insights for an excursion based on family composition.
+    
+    Args:
+        description: Excursion description text
+        location: Location name from the related Cruise Details
+        family_context: Dynamic family context from People database
+        
+    Returns:
+        Travel agent insights
+    """
+    if not description:
+        return "No description available for insights."
+    
+    try:
+        prompt = f"""As an experienced travel agent who has worked with similar families in {location}, provide 2-3 paragraphs of insights about this excursion, considering the following family composition:
+
+{family_context}
+
+Based on the excursion description below, provide specific insights about how this excursion would work for this family, including any tips for maximizing enjoyment for all age groups, potential challenges to consider, and recommendations for family dynamics. Keep the response limited to 2000 characters.
+
+Excursion Description:
+{description}"""
+
+        response = openai_client.chat.completions.create(
+            model="gpt-4.5-preview",
+            messages=[
+                {"role": "system", "content": "You are an experienced travel agent who specializes in multi-generational family cruise excursions. You have extensive experience with Mediterranean destinations and understand how to balance different age groups' needs and interests."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=400,
+            temperature=0.7
+        )
+        
+        insights = response.choices[0].message.content.strip()
+        return insights
+    except Exception as e:
+        logger.error(f"Error generating guide insights: {e}")
+        return "Error generating travel agent insights."
+
+def update_notion_page(page_id: str, summary: str, recommendation: str, guide_insights: str) -> bool:
     """
     Update a Notion page with AI-generated content.
     
@@ -255,6 +399,7 @@ def update_notion_page(page_id: str, summary: str, recommendation: str) -> bool:
         page_id: ID of the page to update
         summary: AI-generated summary
         recommendation: AI-generated recommendation
+        guide_insights: Travel agent insights
         
     Returns:
         True if update was successful, False otherwise
@@ -282,6 +427,16 @@ def update_notion_page(page_id: str, summary: str, recommendation: str) -> bool:
                             }
                         }
                     ]
+                },
+                GUIDE_INSIGHTS_PROPERTY: {
+                    "rich_text": [
+                        {
+                            "type": "text",
+                            "text": {
+                                "content": guide_insights
+                            }
+                        }
+                    ]
                 }
             }
         )
@@ -301,9 +456,14 @@ def main() -> None:
         logger.error("Missing required environment variables. Please check your .env file.")
         sys.exit(1)
     
-    # Fetch pages from the database
-    logger.info("Fetching pages from Notion database...")
-    pages = get_database_pages(args.page_id)
+    # Build dynamic family context
+    logger.info("Building family context from People database...")
+    family_context = build_family_context()
+    logger.info("Family context built successfully.")
+    
+    # Fetch pages from the excursions database
+    logger.info("Fetching pages from Notion excursions database...")
+    pages = get_database_pages(DATABASE_ID, args.page_id)
     
     if not pages:
         logger.error("No pages found in the database.")
@@ -341,9 +501,13 @@ def main() -> None:
         # Get the pre-generated recommendation
         recommendation = recommendations.get(excursion["id"], "No recommendation available.")
         
+        # Generate travel agent insights
+        logger.info(f"Generating travel agent insights for: {excursion['name']}")
+        guide_insights = generate_guide_insights(excursion["description"], excursion["location"], family_context)
+        
         # Update Notion page
         logger.info(f"Updating Notion page: {excursion['name']}")
-        if update_notion_page(excursion["id"], summary, recommendation):
+        if update_notion_page(excursion["id"], summary, recommendation, guide_insights):
             updates_count += 1
         
         # Add a small delay to avoid rate limits

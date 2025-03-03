@@ -11,6 +11,7 @@ This Python program connects to a Notion database containing excursion options f
 - Dynamically reads family member details from a separate "People" database
 - Updates the Notion database with the AI-generated content
 - Can be configured to update all records or a specific record
+- Selectively update only specific AI-generated fields
 
 ## Setup
 
@@ -29,15 +30,63 @@ This Python program connects to a Notion database containing excursion options f
 
 ## Usage
 
-Run the program to update all excursion records:
+### Basic Usage
+
+Run the program to update all excursion records with all AI-generated fields:
 ```
 python notion_excursion_ai.py
 ```
 
-Update only a specific record:
+### Selective Updates
+
+Update only specific AI-generated fields:
+```
+# Update only the AI Summary field
+python notion_excursion_ai.py --update-summary
+
+# Update only the AI Recommendation field
+python notion_excursion_ai.py --update-recommendation
+
+# Update only the Guide Insights field
+python notion_excursion_ai.py --update-insights
+
+# Update both Summary and Recommendation fields
+python notion_excursion_ai.py --update-summary --update-recommendation
+
+# Explicitly update all fields (same as default)
+python notion_excursion_ai.py --update-all
+```
+
+### Targeting Specific Records
+
+Update only a specific record (by page ID):
 ```
 python notion_excursion_ai.py --page-id your_page_id
 ```
+
+Combine specific record with selective field updates:
+```
+# Update only the Guide Insights for a specific excursion
+python notion_excursion_ai.py --page-id your_page_id --update-insights
+```
+
+### Debugging
+
+Enable debug logging for more detailed output:
+```
+python notion_excursion_ai.py --debug
+```
+
+## Command-Line Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `--page-id PAGE_ID` | Process only a specific page (by ID) |
+| `--update-summary` | Update the AI Summary field |
+| `--update-recommendation` | Update the AI Recommendation field |
+| `--update-insights` | Update the Guide Insights field |
+| `--update-all` | Update all AI-generated fields (default if no specific update flags are provided) |
+| `--debug` | Enable debug logging |
 
 ## Notion Database Structure
 

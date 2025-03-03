@@ -391,56 +391,69 @@ Excursion Description:
         logger.error(f"Error generating guide insights: {e}")
         return "Error generating travel agent insights."
 
-def update_notion_page(page_id: str, summary: str, recommendation: str, guide_insights: str) -> bool:
+def update_notion_page(page_id: str, summary: str = None, recommendation: str = None, guide_insights: str = None) -> bool:
     """
     Update a Notion page with AI-generated content.
     
     Args:
         page_id: ID of the page to update
-        summary: AI-generated summary
-        recommendation: AI-generated recommendation
-        guide_insights: Travel agent insights
+        summary: AI-generated summary (optional)
+        recommendation: AI-generated recommendation (optional)
+        guide_insights: Travel agent insights (optional)
         
     Returns:
         True if update was successful, False otherwise
     """
     try:
-        notion.pages.update(
-            page_id=page_id,
-            properties={
-                AI_SUMMARY_PROPERTY: {
-                    "rich_text": [
-                        {
-                            "type": "text",
-                            "text": {
-                                "content": summary
-                            }
+        properties = {}
+        
+        # Only include properties that have values
+        if summary is not None:
+            properties[AI_SUMMARY_PROPERTY] = {
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "text": {
+                            "content": summary
                         }
-                    ]
-                },
-                AI_RECOMMENDATION_PROPERTY: {
-                    "rich_text": [
-                        {
-                            "type": "text",
-                            "text": {
-                                "content": recommendation
-                            }
-                        }
-                    ]
-                },
-                GUIDE_INSIGHTS_PROPERTY: {
-                    "rich_text": [
-                        {
-                            "type": "text",
-                            "text": {
-                                "content": guide_insights
-                            }
-                        }
-                    ]
-                }
+                    }
+                ]
             }
-        )
-        return True
+        
+        if recommendation is not None:
+            properties[AI_RECOMMENDATION_PROPERTY] = {
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "text": {
+                            "content": recommendation
+                        }
+                    }
+                ]
+            }
+        
+        if guide_insights is not None:
+            properties[GUIDE_INSIGHTS_PROPERTY] = {
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "text": {
+                            "content": guide_insights
+                        }
+                    }
+                ]
+            }
+        
+        # Only update if there are properties to update
+        if properties:
+            notion.pages.update(
+                page_id=page_id,
+                properties=properties
+            )
+            return True
+        else:
+            logger.warning(f"No properties to update for page {page_id}")
+            return False
     except Exception as e:
         logger.error(f"Error updating page {page_id}: {e}")
         return False
@@ -449,17 +462,41 @@ def main() -> None:
     """Main function to run the program."""
     parser = argparse.ArgumentParser(description="Enhance Notion excursion database with AI-generated content")
     parser.add_argument("--page-id", help="Process only a specific page (by ID)")
+    parser.add_argument("--update-summary", action="store_true", help="Update the AI Summary field")
+    parser.add_argument("--update-recommendation", action="store_true", help="Update the AI Recommendation field")
+    parser.add_argument("--update-insights", action="store_true", help="Update the Guide Insights field")
+    parser.add_argument("--update-all", action="store_true", help="Update all AI-generated fields (default if no specific update flags are provided)")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
+    
+    # Set debug logging if requested
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
     
     # Check for required environment variables
     if not all([os.environ.get("NOTION_API_KEY"), os.environ.get("NOTION_DATABASE_ID"), os.environ.get("OPENAI_API_KEY")]):
         logger.error("Missing required environment variables. Please check your .env file.")
         sys.exit(1)
     
-    # Build dynamic family context
-    logger.info("Building family context from People database...")
-    family_context = build_family_context()
-    logger.info("Family context built successfully.")
+    # Determine which fields to update
+    update_summary = args.update_summary
+    update_recommendation = args.update_recommendation
+    update_insights = args.update_insights
+    
+    # If no specific update flags are provided, update all fields
+    if not any([update_summary, update_recommendation, update_insights, args.update_all]):
+        logger.info("No specific update flags provided. Updating all fields.")
+        update_summary = update_recommendation = update_insights = True
+    elif args.update_all:
+        update_summary = update_recommendation = update_insights = True
+    
+    # Build dynamic family context if needed
+    family_context = None
+    if update_insights:
+        logger.info("Building family context from People database...")
+        family_context = build_family_context()
+        logger.info("Family context built successfully.")
     
     # Fetch pages from the excursions database
     logger.info("Fetching pages from Notion excursions database...")
@@ -480,30 +517,40 @@ def main() -> None:
         else:
             logger.warning(f"Skipping page {excursion_data['id']} ({excursion_data['name']}) - no description found.")
     
-    # Group excursions by location for recommendation generation
-    excursions_by_location = defaultdict(list)
-    for excursion in excursions:
-        excursions_by_location[excursion["location"]].append(excursion)
-    
-    # Generate AI summaries and recommendations
+    # Generate AI content and update pages
     logger.info("Generating AI content...")
     updates_count = 0
     
-    # Generate recommendations first (requires comparative analysis)
-    recommendations = generate_recommendations(excursions_by_location)
+    # Generate recommendations if needed (requires comparative analysis)
+    recommendations = {}
+    if update_recommendation:
+        # Group excursions by location for recommendation generation
+        excursions_by_location = defaultdict(list)
+        for excursion in excursions:
+            excursions_by_location[excursion["location"]].append(excursion)
+        
+        recommendations = generate_recommendations(excursions_by_location)
     
     # Process each excursion
     for excursion in excursions:
-        # Generate summary
-        logger.info(f"Generating summary for: {excursion['name']}")
-        summary = generate_ai_summary(excursion["description"])
+        # Values to update (None by default)
+        summary = None
+        recommendation = None
+        guide_insights = None
         
-        # Get the pre-generated recommendation
-        recommendation = recommendations.get(excursion["id"], "No recommendation available.")
+        # Generate summary if needed
+        if update_summary:
+            logger.info(f"Generating summary for: {excursion['name']}")
+            summary = generate_ai_summary(excursion["description"])
         
-        # Generate travel agent insights
-        logger.info(f"Generating travel agent insights for: {excursion['name']}")
-        guide_insights = generate_guide_insights(excursion["description"], excursion["location"], family_context)
+        # Get the pre-generated recommendation if needed
+        if update_recommendation:
+            recommendation = recommendations.get(excursion["id"], "No recommendation available.")
+        
+        # Generate travel agent insights if needed
+        if update_insights:
+            logger.info(f"Generating travel agent insights for: {excursion['name']}")
+            guide_insights = generate_guide_insights(excursion["description"], excursion["location"], family_context)
         
         # Update Notion page
         logger.info(f"Updating Notion page: {excursion['name']}")
@@ -513,7 +560,14 @@ def main() -> None:
         # Add a small delay to avoid rate limits
         time.sleep(1)
     
+    # Log summary of updates
     logger.info(f"Process completed. Updated {updates_count} out of {len(excursions)} excursions.")
+    if update_summary:
+        logger.info(f"Updated AI Summary field.")
+    if update_recommendation:
+        logger.info(f"Updated AI Recommendation field.")
+    if update_insights:
+        logger.info(f"Updated Guide Insights field.")
 
 if __name__ == "__main__":
     main() 
